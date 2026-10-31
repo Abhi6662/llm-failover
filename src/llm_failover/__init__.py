@@ -2,7 +2,7 @@
 
 __version__ = "0.1.0"
 
-from .client import FailoverClient
+from .client import EndpointConfig, FailoverClient
 from .telemetry import Telemetry
 
-__all__ = ["FailoverClient", "Telemetry"]
+__all__ = ["EndpointConfig", "FailoverClient", "Telemetry"]
