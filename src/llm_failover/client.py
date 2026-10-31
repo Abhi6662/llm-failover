@@ -1,5 +1,6 @@
 """OpenAI-compatible client with automatic failover."""
 
+import random
 import time
 from typing import Any, Dict, List, Optional
 import httpx
@@ -38,6 +39,39 @@ class FailoverClient:
     def _set_cooldown(self, endpoint: EndpointConfig) -> None:
         """Set cooldown for endpoint."""
         self._cooldowns[endpoint.url] = time.time() + endpoint.cooldown_seconds
+    
+    def _get_backoff_time(self, attempt: int) -> float:
+        """Calculate backoff time with jitter.
+        
+        Args:
+            attempt: Retry attempt number (0-indexed)
+            
+        Returns:
+            Backoff time in seconds with jitter
+        """
+        base_delay = min(60, 2 ** attempt)
+        jitter = random.uniform(0, base_delay * 0.1)
+        return base_delay + jitter
+    
+    def endpoint_health(self) -> Dict[str, Dict]:
+        """Get health summary of all endpoints.
+        
+        Returns:
+            Dictionary mapping endpoint URLs to their health status
+        """
+        health = {}
+        current_time = time.time()
+        
+        for endpoint in self.endpoints:
+            cooldown_until = self._cooldowns.get(endpoint.url, 0)
+            is_available = current_time >= cooldown_until
+            
+            health[endpoint.url] = {
+                "available": is_available,
+                "cooldown_remaining": max(0, int(cooldown_until - current_time))
+            }
+        
+        return health
     
     def chat_completion(self, messages: List[Dict[str, str]], model: str, 
                        max_tokens: int = 100, **kwargs) -> Dict[str, Any]:
