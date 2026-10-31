@@ -1,6 +1,5 @@
 # llm-failover
 
-[![CI](https://github.com/Abhi6662/llm-failover/actions/workflows/ci.yml/badge.svg)](https://github.com/Abhi6662/llm-failover/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
