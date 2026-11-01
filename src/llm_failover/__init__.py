@@ -4,6 +4,13 @@ __version__ = "0.3.0"
 
 from .client import EndpointConfig, FailoverClient
 from .telemetry import Telemetry
-from .circuit_breaker import CircuitBreaker, CircuitState
+from .circuit_breaker import CircuitBreaker, CircuitState, StateChangeCallback
 
-__all__ = ["EndpointConfig", "FailoverClient", "Telemetry", "CircuitBreaker", "CircuitState"]
+__all__ = [
+    "EndpointConfig",
+    "FailoverClient",
+    "Telemetry",
+    "CircuitBreaker",
+    "CircuitState",
+    "StateChangeCallback",
+]
