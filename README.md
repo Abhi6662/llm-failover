@@ -8,6 +8,7 @@ Python library for OpenAI-compatible multi-endpoint failover with automatic cool
 ## Features
 
 - **Automatic Failover**: Rotates across multiple endpoints on 429/502/503 errors or timeouts
+- **Circuit Breaker**: Three-state circuit breaker (CLOSED/OPEN/HALF_OPEN) prevents cascading failures
 - **Cooldown Tracking**: Per-endpoint cooldown prevents hammering failing services
 - **SQLite Telemetry**: Tracks token usage and latency for cost monitoring
 - **OpenAI Compatible**: Drop-in replacement for standard OpenAI clients
@@ -21,15 +22,18 @@ pip install llm-failover
 ## Usage
 
 ```python
-from llm_failover import FailoverClient, EndpointConfig, Telemetry
+from llm_failover import FailoverClient, EndpointConfig, Telemetry, CircuitBreaker
 
 endpoints = [
     EndpointConfig(url="https://api.primary.com/v1", api_key="sk-xxx"),
     EndpointConfig(url="https://api.backup.com/v1", api_key="sk-yyy", cooldown_seconds=30)
 ]
 
+# Optional: customize circuit breaker thresholds
+circuit_breaker = CircuitBreaker(failure_threshold=5, recovery_timeout=60)
+
 telemetry = Telemetry()
-client = FailoverClient(endpoints=endpoints, telemetry=telemetry)
+client = FailoverClient(endpoints=endpoints, telemetry=telemetry, circuit_breaker=circuit_breaker)
 
 response = client.chat_completion(
     messages=[{"role": "user", "content": "Hello"}],
@@ -39,6 +43,9 @@ response = client.chat_completion(
 
 print(response["choices"][0]["message"]["content"])
 print(telemetry.get_stats())
+
+# Check endpoint health including circuit breaker state
+print(client.endpoint_health())
 ```
 
 ## Development

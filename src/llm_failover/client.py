@@ -5,6 +5,7 @@ import time
 from typing import Any, Dict, List, Optional
 import httpx
 from pydantic import BaseModel
+from .circuit_breaker import CircuitBreaker
 
 
 class EndpointConfig(BaseModel):
@@ -18,23 +19,28 @@ class EndpointConfig(BaseModel):
 class FailoverClient:
     """OpenAI-compatible client with automatic endpoint rotation."""
     
-    def __init__(self, endpoints: List[EndpointConfig], telemetry: Optional[Any] = None):
+    def __init__(self, endpoints: List[EndpointConfig], telemetry: Optional[Any] = None,
+                 circuit_breaker: Optional[CircuitBreaker] = None):
         """Initialize client with multiple endpoints.
         
         Args:
             endpoints: List of endpoint configurations
             telemetry: Optional telemetry tracker
+            circuit_breaker: Optional circuit breaker (default: new instance)
         """
         if not endpoints:
             raise ValueError("At least one endpoint required")
         self.endpoints = endpoints
         self.telemetry = telemetry
         self._cooldowns: Dict[str, float] = {}
+        self.circuit_breaker = circuit_breaker or CircuitBreaker()
     
     def _is_available(self, endpoint: EndpointConfig) -> bool:
-        """Check if endpoint is available (not in cooldown)."""
+        """Check if endpoint is available (not in cooldown and circuit closed)."""
         cooldown_until = self._cooldowns.get(endpoint.url, 0)
-        return time.time() >= cooldown_until
+        cooldown_ok = time.time() >= cooldown_until
+        circuit_ok = self.circuit_breaker.is_available(endpoint.url)
+        return cooldown_ok and circuit_ok
     
     def _set_cooldown(self, endpoint: EndpointConfig) -> None:
         """Set cooldown for endpoint."""
@@ -64,12 +70,20 @@ class FailoverClient:
         
         for endpoint in self.endpoints:
             cooldown_until = self._cooldowns.get(endpoint.url, 0)
-            is_available = current_time >= cooldown_until
+            cooldown_ok = current_time >= cooldown_until
+            
+            # Get circuit breaker health
+            circuit_health = self.circuit_breaker.get_health(endpoint.url)
             
             health[endpoint.url] = {
-                "available": is_available,
-                "cooldown_remaining": max(0, int(cooldown_until - current_time))
+                "available": cooldown_ok and circuit_health["available"],
+                "cooldown_remaining": max(0, int(cooldown_until - current_time)),
+                "circuit_state": circuit_health["state"],
+                "circuit_failures": circuit_health["failures"]
             }
+            
+            if "recovery_in" in circuit_health:
+                health[endpoint.url]["circuit_recovery_in"] = circuit_health["recovery_in"]
         
         return health
     
@@ -117,11 +131,15 @@ class FailoverClient:
                     
                     if response.status_code in (429, 502, 503):
                         self._set_cooldown(endpoint)
+                        self.circuit_breaker.record_failure(endpoint.url)
                         last_error = f"HTTP {response.status_code}"
                         continue
                     
                     response.raise_for_status()
                     result = response.json()
+                    
+                    # Record success in circuit breaker
+                    self.circuit_breaker.record_success(endpoint.url)
                     
                     if self.telemetry:
                         tokens = result.get("usage", {}).get("total_tokens", 0)
@@ -131,9 +149,11 @@ class FailoverClient:
                     
             except (httpx.TimeoutException, httpx.HTTPStatusError) as e:
                 self._set_cooldown(endpoint)
+                self.circuit_breaker.record_failure(endpoint.url)
                 last_error = str(e)
                 continue
             except Exception as e:
+                self.circuit_breaker.record_failure(endpoint.url)
                 last_error = str(e)
                 continue
         
