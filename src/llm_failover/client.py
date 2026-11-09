@@ -9,6 +9,45 @@ from pydantic import BaseModel
 from .circuit_breaker import CircuitBreaker
 
 
+def parse_retry_after(header_value: Optional[str]) -> Optional[int]:
+    """
+    Parse Retry-After header value into seconds.
+
+    Supports two formats per RFC 7231:
+    - Seconds: "120" (delay in seconds)
+    - HTTP-date: "Wed, 21 Oct 2015 07:28:00 GMT" (absolute time)
+
+    Args:
+        header_value: Raw Retry-After header value
+
+    Returns:
+        Seconds to wait, or None if parsing fails
+    """
+    if not header_value:
+        return None
+
+    header_value = header_value.strip()
+
+    # Try seconds format (integer)
+    try:
+        return int(header_value)
+    except ValueError:
+        pass
+
+    # Try HTTP-date format
+    try:
+        # Parse HTTP date (RFC 7231 / RFC 1123)
+        from email.utils import parsedate_to_datetime
+        retry_date = parsedate_to_datetime(header_value)
+        if retry_date:
+            delay = int(retry_date.timestamp() - time.time())
+            return max(0, delay)
+    except Exception:
+        pass
+
+    return None
+
+
 class EndpointConfig(BaseModel):
     """Endpoint configuration."""
     url: str
@@ -43,9 +82,18 @@ class FailoverClient:
         circuit_ok = self.circuit_breaker.is_available(endpoint.url)
         return cooldown_ok and circuit_ok
 
-    def _set_cooldown(self, endpoint: EndpointConfig) -> None:
-        """Set cooldown for endpoint."""
-        self._cooldowns[endpoint.url] = time.time() + endpoint.cooldown_seconds
+    def _set_cooldown(self, endpoint: EndpointConfig, retry_after_seconds: Optional[int] = None) -> None:
+        """Set cooldown for endpoint.
+
+        Args:
+            endpoint: The endpoint to set cooldown on
+            retry_after_seconds: Optional Retry-After value from response header (takes precedence)
+        """
+        if retry_after_seconds is not None:
+            # Use Retry-After header if provided, with a reasonable cap
+            self._cooldowns[endpoint.url] = time.time() + min(retry_after_seconds, 300)
+        else:
+            self._cooldowns[endpoint.url] = time.time() + endpoint.cooldown_seconds
 
     def _get_backoff_time(self, attempt: int) -> float:
         """Calculate backoff time with jitter.
@@ -106,7 +154,11 @@ class FailoverClient:
                 }
             ) as response:
                 if response.status_code in (429, 502, 503):
-                    self._set_cooldown(endpoint)
+                    # Check for Retry-After header
+                    retry_after = None
+                    if "retry-after" in response.headers:
+                        retry_after = parse_retry_after(response.headers["retry-after"])
+                    self._set_cooldown(endpoint, retry_after)
                     self.circuit_breaker.record_failure(endpoint.url)
                     raise RuntimeError(f"HTTP {response.status_code}")
 
@@ -214,7 +266,11 @@ class FailoverClient:
                     latency_ms = int((time.time() - start_time) * 1000)
 
                     if response.status_code in (429, 502, 503):
-                        self._set_cooldown(endpoint)
+                        # Check for Retry-After header
+                        retry_after = None
+                        if "retry-after" in response.headers:
+                            retry_after = parse_retry_after(response.headers["retry-after"])
+                        self._set_cooldown(endpoint, retry_after)
                         self.circuit_breaker.record_failure(endpoint.url)
                         last_error = f"HTTP {response.status_code}"
                         continue
@@ -231,8 +287,18 @@ class FailoverClient:
 
                     return result
 
-            except (httpx.TimeoutException, httpx.HTTPStatusError) as e:
+            except httpx.TimeoutException as e:
                 self._set_cooldown(endpoint)
+                self.circuit_breaker.record_failure(endpoint.url)
+                last_error = str(e)
+                continue
+            except httpx.HTTPStatusError as e:
+                # Extract Retry-After header if present
+                retry_after = None
+                if hasattr(e, 'response') and e.response is not None:
+                    if "retry-after" in e.response.headers:
+                        retry_after = parse_retry_after(e.response.headers["retry-after"])
+                self._set_cooldown(endpoint, retry_after)
                 self.circuit_breaker.record_failure(endpoint.url)
                 last_error = str(e)
                 continue
